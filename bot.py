@@ -1,84 +1,77 @@
 import os
-import asyncio
 import logging
-import aiohttp
+import requests
 from aiogram import Bot, Dispatcher, types
-from aiogram.types.input_file import InputFile
+from aiogram.types import InputFile
+from aiogram.utils import executor
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_PASSWORD = os.getenv("IG_PASSWORD")
-HTTP_PROXY = os.getenv("HTTP_PROXY")  # пример: http://username:password@proxy:port
-HTTPS_PROXY = os.getenv("HTTPS_PROXY")  # пример: http://username:password@proxy:port
+INSTAGRAM_LOGIN = os.getenv("INSTAGRAM_LOGIN")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+HTTP_PROXY = os.getenv("HTTP_PROXY")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY")
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env!")
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Создаём бота
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-# Используем aiohttp с прокси
-async def fetch(session, url):
+# Настройки прокси для requests
+proxies = {}
+if HTTP_PROXY:
+    proxies["http"] = HTTP_PROXY
+if HTTPS_PROXY:
+    proxies["https"] = HTTPS_PROXY
+
+# Функция для скачивания фото по ссылке
+def download_instagram_photo(url: str) -> str:
     try:
-        async with session.get(url, proxy=HTTPS_PROXY or HTTP_PROXY) as response:
-            return await response.read()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/114.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
+        response.raise_for_status()
+
+        filename = url.split("/")[-1] + ".jpg"
+        with open(filename, "wb") as f:
+            f.write(response.content)
+
+        return filename
     except Exception as e:
         logging.error(f"Ошибка при скачивании: {e}")
         return None
 
-async def download_instagram_image(url: str) -> str | None:
-    """
-    Скачивает изображение с поста Instagram через прокси.
-    Возвращает имя сохранённого файла или None при ошибке.
-    """
-    shortcode = url.strip("/").split("/")[-1]
-    json_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-    
-    async with aiohttp.ClientSession() as session:
-        content = await fetch(session, json_url)
-        if not content:
-            return None
-        try:
-            import json
-            data = json.loads(content)
-            image_url = data["graphql"]["shortcode_media"]["display_url"]
-        except Exception as e:
-            logging.error(f"Ошибка при парсинге JSON: {e}")
-            return None
+# Команда /start
+@dp.message_handler(commands=["start"])
+async def start_command(message: types.Message):
+    await message.reply("Привет! Отправь ссылку на пост в Instagram, и я скачаю фото.")
 
-        # Скачиваем изображение
-        image_data = await fetch(session, image_url)
-        if not image_data:
-            return None
-
-        filename = f"{shortcode}.jpg"
-        with open(filename, "wb") as f:
-            f.write(image_data)
-        return filename
-
+# Обработка сообщений с ссылкой
 @dp.message_handler()
-async def handle_message(message: types.Message):
+async def handle_instagram_link(message: types.Message):
     url = message.text.strip()
-    logging.info(f"Получено сообщение: {url}")
-    await message.reply("Скачиваю изображение...")
-    filename = await download_instagram_image(url)
+    await message.reply("Скачиваю фото...")
+    filename = download_instagram_photo(url)
     if filename:
         try:
-            await message.answer_photo(InputFile(filename))
-            os.remove(filename)
+            await message.reply_photo(photo=InputFile(filename))
         except Exception as e:
             await message.reply(f"Ошибка при отправке фото: {e}")
+        finally:
+            os.remove(filename)
     else:
-        await message.reply("Не удалось скачать изображение. Возможно, прокси нужен или пост недоступен.")
-
-async def main():
-    logging.info("Бот запущен...")
-    await dp.start_polling()
+        await message.reply("Не удалось скачать фото.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True)
