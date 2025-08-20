@@ -1,64 +1,100 @@
 import os
-import logging
-import requests
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile
-from aiogram.utils import executor
+from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+import instaloader
+import asyncio
 
-# Загружаем переменные окружения
-load_dotenv()
+# --- Загружаем .env ---
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PROXY = os.getenv("PROXY")  # http://IP:PORT
-
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env!")
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+IG_USERNAME = os.getenv("IG_USERNAME")
+IG_PASSWORD = os.getenv("IG_PASSWORD")
 
-# Настройка прокси для aiogram через requests
-proxies = {"http": PROXY, "https": PROXY}
-
+# --- Инициализация бота ---
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
-def download_instagram_photo(url: str) -> str:
-    """Скачивает фото из Instagram по URL через прокси."""
+# --- Настройка Instaloader ---
+L = instaloader.Instaloader()
+if IG_USERNAME and IG_PASSWORD:
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
-        response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
-        response.raise_for_status()
-        filename = url.split("/")[-1].split("?")[0] + ".jpg"
-        with open(filename, "wb") as f:
-            f.write(response.content)
-        return filename
+        L.login(IG_USERNAME, IG_PASSWORD)
+        print("✅ Успешный вход в Instagram")
     except Exception as e:
-        return f"Ошибка при скачивании: {e}"
+        print(f"Ошибка при логине в Instagram: {e}")
 
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    await message.answer("Привет! Пришли мне ссылку на фото в Instagram, и я его скачаю.")
+# --- Вспомогательная функция ---
+def extract_shortcode(url: str) -> Optional[str]:
+    """Извлекает shortcode из ссылки Instagram поста."""
+    if "/p/" in url:
+        return url.split("/p/")[1].split("/")[0]
+    if "/reel/" in url:
+        return url.split("/reel/")[1].split("/")[0]
+    if "/tv/" in url:
+        return url.split("/tv/")[1].split("/")[0]
+    return None
 
-@dp.message_handler()
-async def handle_message(message: types.Message):
+# --- /start ---
+@dp.message(F.text == "/start")
+async def start_handler(message: Message):
+    await message.reply(
+        "Привет! 👋 Пришли ссылку на Instagram пост, фото, карусель или Reels — я загружу и отправлю их сюда."
+    )
+
+# --- обработчик Instagram ссылок ---
+@dp.message(F.text.startswith("https://www.instagram.com/"))
+async def download_instagram_post(message: Message):
     url = message.text.strip()
-    if not url.startswith("http"):
-        await message.reply("Пожалуйста, пришли корректную ссылку на Instagram.")
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        await message.reply("Не удалось распознать ссылку ❌")
         return
 
-    await message.reply("Скачиваю фото... ⏳")
-    result = download_instagram_photo(url)
+    try:
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
 
-    if result.endswith(".jpg"):
-        photo = InputFile(result)
-        await message.reply_photo(photo)
-        os.remove(result)  # удаляем файл после отправки
-    else:
-        await message.reply(result)
+        sent_any = False
+
+        # Если пост — карусель (несколько фото/видео)
+        if post.typename == "GraphSidecar":
+            for node in post.get_sidecar_nodes():
+                if node.is_video:
+                    await message.reply_video(video=node.video_url)
+                else:
+                    await message.reply_photo(photo=node.display_url)
+                sent_any = True
+        else:
+            # Обычное фото или видео
+            if post.is_video:
+                await message.reply_video(video=post.video_url)
+            else:
+                await message.reply_photo(photo=post.url)
+            sent_any = True
+
+        if sent_any:
+            await message.reply("✅ Контент успешно отправлен!")
+        else:
+            await message.reply("Не удалось получить медиафайл ❌")
+
+    except Exception as e:
+        await message.reply(f"Ошибка при скачивании: {e}")
+
+# --- обработчик некорректных сообщений ---
+@dp.message(F.text)
+async def fallback_handler(message: Message):
+    await message.reply("⚠️ Это не похоже на ссылку Instagram. Пожалуйста, отправьте корректный линк!")
+
+# --- Запуск бота ---
+async def main():
+    print("🤖 Бот запущен...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
