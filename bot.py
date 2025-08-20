@@ -10,68 +10,55 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-INSTAGRAM_LOGIN = os.getenv("INSTAGRAM_LOGIN")
-INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
-HTTP_PROXY = os.getenv("HTTP_PROXY")
-HTTPS_PROXY = os.getenv("HTTPS_PROXY")
+PROXY = os.getenv("PROXY")  # http://IP:PORT
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env!")
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Создаём бота
+# Настройка прокси для aiogram через requests
+proxies = {"http": PROXY, "https": PROXY}
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-# Настройки прокси для requests
-proxies = {}
-if HTTP_PROXY:
-    proxies["http"] = HTTP_PROXY
-if HTTPS_PROXY:
-    proxies["https"] = HTTPS_PROXY
-
-# Функция для скачивания фото по ссылке
 def download_instagram_photo(url: str) -> str:
+    """Скачивает фото из Instagram по URL через прокси."""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/114.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         }
-        response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
         response.raise_for_status()
-
-        filename = url.split("/")[-1] + ".jpg"
+        filename = url.split("/")[-1].split("?")[0] + ".jpg"
         with open(filename, "wb") as f:
             f.write(response.content)
-
         return filename
     except Exception as e:
-        logging.error(f"Ошибка при скачивании: {e}")
-        return None
+        return f"Ошибка при скачивании: {e}"
 
-# Команда /start
 @dp.message_handler(commands=["start"])
-async def start_command(message: types.Message):
-    await message.reply("Привет! Отправь ссылку на пост в Instagram, и я скачаю фото.")
+async def start(message: types.Message):
+    await message.answer("Привет! Пришли мне ссылку на фото в Instagram, и я его скачаю.")
 
-# Обработка сообщений с ссылкой
 @dp.message_handler()
-async def handle_instagram_link(message: types.Message):
+async def handle_message(message: types.Message):
     url = message.text.strip()
-    await message.reply("Скачиваю фото...")
-    filename = download_instagram_photo(url)
-    if filename:
-        try:
-            await message.reply_photo(photo=InputFile(filename))
-        except Exception as e:
-            await message.reply(f"Ошибка при отправке фото: {e}")
-        finally:
-            os.remove(filename)
+    if not url.startswith("http"):
+        await message.reply("Пожалуйста, пришли корректную ссылку на Instagram.")
+        return
+
+    await message.reply("Скачиваю фото... ⏳")
+    result = download_instagram_photo(url)
+
+    if result.endswith(".jpg"):
+        photo = InputFile(result)
+        await message.reply_photo(photo)
+        os.remove(result)  # удаляем файл после отправки
     else:
-        await message.reply("Не удалось скачать фото.")
+        await message.reply(result)
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
